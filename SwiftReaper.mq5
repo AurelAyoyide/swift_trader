@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "2.00"
-#property description "SwiftReaper v2.0 - Le Faucheur de Pips"
+#property version   "2.10"
+#property description "SwiftReaper v2.1 - Le Faucheur de Pips"
 #property description "Système de notifications Forex - Tendance + Pullback"
 #property strict
 
@@ -139,7 +139,7 @@ int OnInit()
    // Détection tendance initiale
    DetectTrend();
    
-   Print("✅ SwiftReaper v2.0 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper v2.1 initialisé sur ", g_displayName);
    Print("📍 Mode: Notifications uniquement");
    Print("⏰ Heures actives: ", StartHour, "h - ", EndHour, "h (Bénin)");
    if(g_inPosition)
@@ -621,7 +621,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER v2.0", x, y, clrWhite, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER v2.1", x, y, clrBlack, 12);
    y += 25;
    
    // Symbole

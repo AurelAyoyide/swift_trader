@@ -1,4 +1,4 @@
-# ☠️ SwiftReaper v2.0 - Guide d'Installation Complet
+# ☠️ SwiftReaper v2.1 - Guide d'Installation Complet
 
 > **Le Faucheur de Pips** - Système de notifications Forex haute précision
 
