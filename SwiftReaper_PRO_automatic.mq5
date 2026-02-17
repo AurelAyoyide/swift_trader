@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.20"
-#property description "SwiftReaper PRO v4.2 - Le Faucheur Ultime"
+#property version   "4.30"
+#property description "SwiftReaper PRO v4.3 - Le Faucheur Ultime"
 #property description "Trailing Stop + Breakeven + Filling Auto-Detect"
 #property description "Sorties H24 - Anti-doji - Mode Pot de Paris"
 #property strict
@@ -59,15 +59,15 @@ input ENUM_TIMEFRAMES TF_Entry = PERIOD_M5;      // Timeframe entrée (M5)
 input group "=== TENDANCE H1 ==="
 input int      EMA_Period = 50;                  // Période EMA (tendance H1)
 input int      ADX_Period = 14;                  // Période ADX (force tendance)
-input double   ADX_Threshold = 20.0;             // Seuil ADX minimum (< = RANGE, pas de trade)
+input double   ADX_Threshold = 25.0;             // Seuil ADX minimum (< = RANGE, pas de trade)
 input double   ADX_Strong = 30.0;                // ADX fort (signal confiance HIGH)
 
 // Indicateurs Entrée (M5)
 input group "=== ENTRÉE M5 ==="
 input int      RSI_Period = 14;                  // Période RSI (entrée M5)
-input int      RSI_Oversold = 35;                // RSI survente (BUY zone) - élargi pour + de signaux
-input int      RSI_Overbought = 65;              // RSI surachat (SELL zone) - élargi pour + de signaux
-input int      EMA_Exit_Period = 13;             // EMA sortie M5 (13 = laisse respirer)
+input int      RSI_Oversold = 30;                // RSI survente (BUY zone)
+input int      RSI_Overbought = 70;              // RSI surachat (SELL zone)
+input int      EMA_Exit_Period = 21;             // EMA sortie M5 (21 = laisse respirer les trades)
 input int      RSI_Exit_TakeProfit = 75;         // RSI take profit (surachat extrême)
 input int      RSI_Exit_Secure = 70;             // RSI sécurisation (+ bougie opposée)
 
@@ -76,7 +76,7 @@ input group "=== FILTRES AVANCÉS ==="
 input int      ATR_Period = 14;                  // Période ATR (volatilité)
 input double   ATR_Min_Multiplier = 0.3;         // ATR min vs moyenne (0.3 = 30%, marché mort)
 input int      MaxSpreadPoints = 30;             // Spread max autorisé (en points)
-input int      SignalCooldownMinutes = 10;        // Cooldown entre signaux (minutes)
+input int      SignalCooldownMinutes = 30;        // Cooldown entre signaux (minutes)
 
 // Filtres horaires (Heure du Bénin GMT+1)
 input group "=== FILTRES HORAIRES (Bénin GMT+1) ==="
@@ -236,7 +236,7 @@ int OnInit()
             " | SL: ", (UseStopLoss ? DoubleToString(StopLossATRMultiplier, 1) + "x ATR" : "Désactivé"));
    }
    
-   Print("✅ SwiftReaper PRO v4.2 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper PRO v4.3 initialisé sur ", g_displayName);
    if(HighConfidenceOnly)
       Print("⭐ MODE: HIGH CONFIDENCE ONLY (full margin)");
    Print("📍 Mode: ", EnableAutoTrading ? "AUTO-TRADING" : "Notifications uniquement");
@@ -665,17 +665,17 @@ void CheckExitSignal()
          exitReason = "Engulfing baissier FORT - SORS!";
       }
       
-      // 2. EMA 13 cassée vers le bas - EXIGE 3 CLÔTURES CONSÉCUTIVES
+      // 2. EMA 21 cassée vers le bas - EXIGE 5 CLÔTURES CONSÉCUTIVES (25 min M5)
       // Désactivé quand trailing actif (le trailing gère la sortie)
       bool belowEMA = (closePrice[1] < emaExitValues[1]);
       bool trailingGereSortie = (EnableTrailingStop && g_breakevenApplied);
       if(belowEMA && !shouldExit && !trailingGereSortie)
       {
          g_emaCrossCount++;
-         if(g_emaCrossCount >= 3)
+         if(g_emaCrossCount >= 5)
          {
             shouldExit = true;
-            exitReason = "EMA13 cassée x3 - Momentum perdu";
+            exitReason = "EMA21 cassée x5 - Momentum perdu";
          }
       }
       else if(!belowEMA)
@@ -715,16 +715,16 @@ void CheckExitSignal()
          exitReason = "Engulfing haussier FORT - SORS!";
       }
       
-      // 2. EMA 13 cassée vers le haut - 3 CLÔTURES
+      // 2. EMA 21 cassée vers le haut - 5 CLÔTURES (25 min M5)
       // Désactivé quand trailing actif (le trailing gère la sortie)
       bool aboveEMA = (closePrice[1] > emaExitValues[1]);
       if(aboveEMA && !shouldExit && !(EnableTrailingStop && g_breakevenApplied))
       {
          g_emaCrossCount++;
-         if(g_emaCrossCount >= 3)
+         if(g_emaCrossCount >= 5)
          {
             shouldExit = true;
-            exitReason = "EMA13 cassée x3 - Momentum perdu";
+            exitReason = "EMA21 cassée x5 - Momentum perdu";
          }
       }
       else if(!aboveEMA)
@@ -1044,7 +1044,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.2", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.3", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
