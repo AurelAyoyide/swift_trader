@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.50"
-#property description "SwiftReaper PRO v4.5 - Le Faucheur Ultime"
+#property version   "4.60"
+#property description "SwiftReaper PRO v4.6 - Le Faucheur Ultime"
 #property description "Option A Puriste: Sorties Signal-Based Only"
-#property description "SL 3x ATR filet de sécurité - Pas de BE/Trailing"
+#property description "SL 3x ATR filet de sécurité - Anti-cycling + Startup fix"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -238,7 +238,7 @@ int OnInit()
             " | SL: ", (UseStopLoss ? DoubleToString(StopLossATRMultiplier, 1) + "x ATR" : "Désactivé"));
    }
    
-   Print("✅ SwiftReaper PRO v4.5 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper PRO v4.6 initialisé sur ", g_displayName);
    if(HighConfidenceOnly)
       Print("⭐ MODE: HIGH CONFIDENCE ONLY (full margin)");
    Print("📍 Mode: ", EnableAutoTrading ? "AUTO-TRADING" : "Notifications uniquement");
@@ -280,6 +280,11 @@ void OnTick()
 {
    // Mise à jour spread en temps réel
    g_currentSpread = SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
+   
+   // FIX v4.6: Si tendance encore inconnue (données pas chargées au démarrage), réessayer
+   // Sans ça, le panneau reste "NEUTRE" jusqu'à 59 min et aucun signal ne peut partir
+   if(g_currentTrend == TREND_NONE)
+      DetectTrend();
    
    // Vérification nouvelles bougies fermées
    CheckNewCandles();
@@ -664,9 +669,10 @@ void CheckExitSignal()
    // Nombre de clôtures EMA requis (plus de patience en tendance forte)
    int requiredEMACrosses = strongTrendProtection ? 8 : 5;  // 40 min vs 25 min
    
-   // === PROTECTION BREAKEVEN (notification seulement si pas auto-BE) ===
-   // Quand le RSI passe en zone favorable, prévenir le trader (sauf si déjà breakeven auto)
-   if(!g_breakevenNotified && !g_breakevenApplied)
+   // === PROTECTION BREAKEVEN (notification UNIQUEMENT en mode manuel) ===
+   // FIX v4.6: En auto-trading sans BE, cette notification est mensongère
+   // On ne la montre que quand le trader gère ses positions manuellement
+   if(!EnableAutoTrading && !g_breakevenNotified && !g_breakevenApplied)
    {
       bool breakEvenZone = false;
       if(g_positionType == SIGNAL_BUY && rsi > 50 && rsi < 60)
@@ -698,10 +704,18 @@ void CheckExitSignal()
                                (bodySize1 > bodySize2 * 1.2) &&
                                (bodySize2 > minBodyForEngulfing) &&
                                (bodySize1 > g_currentATR * 0.2);
-      if(bearishEngulfing && !strongTrendProtection && minHoldReached)
+      
+      // FIX v4.6: Engulfing MASSIF (corps > 50% ATR) = sortie même en tendance forte
+      // Un tel engulfing n'est plus du bruit, c'est un vrai retournement/crash
+      bool massiveEngulfing = bearishEngulfing && (bodySize1 > g_currentATR * 0.5);
+      
+      if(bearishEngulfing && minHoldReached && (!strongTrendProtection || massiveEngulfing))
       {
          shouldExit = true;
-         exitReason = "Engulfing baissier + tendance H1 faiblit - SORS!";
+         if(massiveEngulfing && strongTrendProtection)
+            exitReason = "⚠️ ENGULFING MASSIF baissier (>50% ATR) - Override tendance forte!";
+         else
+            exitReason = "Engulfing baissier + tendance H1 faiblit - SORS!";
       }
       
       // 2. EMA 21 cassée vers le bas - clôtures selon force tendance
@@ -750,10 +764,17 @@ void CheckExitSignal()
                                (bodySize1 > bodySize2 * 1.2) &&
                                (bodySize2 > minBodyForEngulfing) &&
                                (bodySize1 > g_currentATR * 0.2);
-      if(bullishEngulfing && !strongTrendProtection && minHoldReached)
+      
+      // FIX v4.6: Engulfing MASSIF (corps > 50% ATR) = sortie même en tendance forte
+      bool massiveEngulfing = bullishEngulfing && (bodySize1 > g_currentATR * 0.5);
+      
+      if(bullishEngulfing && minHoldReached && (!strongTrendProtection || massiveEngulfing))
       {
          shouldExit = true;
-         exitReason = "Engulfing haussier + tendance H1 faiblit - SORS!";
+         if(massiveEngulfing && strongTrendProtection)
+            exitReason = "⚠️ ENGULFING MASSIF haussier (>50% ATR) - Override tendance forte!";
+         else
+            exitReason = "Engulfing haussier + tendance H1 faiblit - SORS!";
       }
       
       // 2. EMA 21 cassée vers le haut - clôtures selon force tendance
@@ -945,6 +966,15 @@ void SendExitSignal(string reason)
    g_entryPrice = 0;
    g_entryTime = 0;
    
+   // FIX v4.6: Reset compteur EMA (sinon un count=4 du trade précédent
+   // cause une sortie immédiate au prochain trade sur la 1ère bougie sous EMA21)
+   g_emaCrossCount = 0;
+   g_breakevenNotified = false;
+   
+   // FIX v4.6: Cooldown après EXIT aussi (anti-cycling)
+   // Sans ça: entrée 10:00 → sortie 10:35 → cooldown = 35min > 30 → re-entrée immédiate
+   g_lastSignalTime = TimeCurrent();
+   
    // Sauvegarder immédiatement
    SaveState();
 }
@@ -1089,7 +1119,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.5", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.6", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
