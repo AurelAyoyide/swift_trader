@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.40"
-#property description "SwiftReaper PRO v4.4 - Le Faucheur Ultime"
-#property description "Protection Tendance Forte + Trailing + Breakeven"
-#property description "Anti-Bruit M5 - Temps Minimum - Seuils ATR"
+#property version   "4.50"
+#property description "SwiftReaper PRO v4.5 - Le Faucheur Ultime"
+#property description "Option A Puriste: Sorties Signal-Based Only"
+#property description "SL 3x ATR filet de sécurité - Pas de BE/Trailing"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -102,15 +102,15 @@ input group "=== AUTO-TRADING (optionnel) ==="
 input bool     EnableAutoTrading = false;        // Activer le trading automatique
 input double   LotSize = 0.01;                   // Taille du lot
 input bool     UseStopLoss = true;               // Utiliser un Stop Loss (basé ATR)
-input double   StopLossATRMultiplier = 2.0;      // Stop Loss = X fois ATR H1
+input double   StopLossATRMultiplier = 3.0;      // Stop Loss = X fois ATR H1 (filet de sécurité large)
 input int      MagicNumber = 202602;             // Numéro magique (identifie nos ordres)
 input int      MaxSlippage = 10;                 // Slippage max (points)
 
 // Gestion du Trade (maximiser les gains)
 input group "=== GESTION DU TRADE ==="
-input bool     EnableTrailingStop = true;        // Trailing Stop (suit le prix)
-input double   TrailingATRMultiplier = 2.0;      // Distance trailing = X fois ATR (2.0 = résiste au bruit)
-input bool     EnableAutoBreakeven = true;       // Breakeven auto (0 perte possible)
+input bool     EnableTrailingStop = false;       // Trailing Stop (désactivé: les signaux gèrent les sorties)
+input double   TrailingATRMultiplier = 2.0;      // Distance trailing = X fois ATR (si activé)
+input bool     EnableAutoBreakeven = false;      // Breakeven auto (désactivé: pas de BE prématuré)
 input double   BreakevenATRMultiplier = 1.5;     // Breakeven quand profit = X fois ATR (1.5 = laisse respirer)
 
 //+------------------------------------------------------------------+
@@ -238,7 +238,7 @@ int OnInit()
             " | SL: ", (UseStopLoss ? DoubleToString(StopLossATRMultiplier, 1) + "x ATR" : "Désactivé"));
    }
    
-   Print("✅ SwiftReaper PRO v4.4 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper PRO v4.5 initialisé sur ", g_displayName);
    if(HighConfidenceOnly)
       Print("⭐ MODE: HIGH CONFIDENCE ONLY (full margin)");
    Print("📍 Mode: ", EnableAutoTrading ? "AUTO-TRADING" : "Notifications uniquement");
@@ -546,8 +546,8 @@ void CheckEntrySignal()
    // === SIGNAL BUY ===
    if(g_currentTrend == TREND_BULLISH)
    {
-      // RSI sort de survente (élargi: seuil 35 au lieu de 30)
-      // OU RSI bas avec mèche forte de rejet
+      // RSI sort de survente + bougie haussiere de confirmation
+      // OU RSI bas avec mèche forte de rejet (pin bar)
       bool rsiExitOversold = (rsiPrev <= RSI_Oversold && rsi > RSI_Oversold);
       bool rsiWithStrongRejection = (rsi < (RSI_Oversold + 5) && bullishRejection && lowerWick > bodySize * 2.0);
       
@@ -705,13 +705,14 @@ void CheckExitSignal()
       }
       
       // 2. EMA 21 cassée vers le bas - clôtures selon force tendance
+      // Compteur tourne dès le début, mais ne déclenche qu'après minHold
       // Désactivé quand trailing actif (le trailing gère la sortie)
       bool belowEMA = (closePrice[1] < emaExitValues[1]);
       bool trailingGereSortie = (EnableTrailingStop && g_breakevenApplied);
-      if(belowEMA && !shouldExit && !trailingGereSortie && minHoldReached)
+      if(belowEMA && !shouldExit && !trailingGereSortie)
       {
          g_emaCrossCount++;
-         if(g_emaCrossCount >= requiredEMACrosses)
+         if(g_emaCrossCount >= requiredEMACrosses && minHoldReached)
          {
             shouldExit = true;
             exitReason = "EMA21 cassée x" + IntegerToString(requiredEMACrosses) + " - Momentum perdu";
@@ -756,12 +757,13 @@ void CheckExitSignal()
       }
       
       // 2. EMA 21 cassée vers le haut - clôtures selon force tendance
+      // Compteur tourne dès le début, mais ne déclenche qu'après minHold
       // Désactivé quand trailing actif (le trailing gère la sortie)
       bool aboveEMA = (closePrice[1] > emaExitValues[1]);
-      if(aboveEMA && !shouldExit && !(EnableTrailingStop && g_breakevenApplied) && minHoldReached)
+      if(aboveEMA && !shouldExit && !(EnableTrailingStop && g_breakevenApplied))
       {
          g_emaCrossCount++;
-         if(g_emaCrossCount >= requiredEMACrosses)
+         if(g_emaCrossCount >= requiredEMACrosses && minHoldReached)
          {
             shouldExit = true;
             exitReason = "EMA21 cassée x" + IntegerToString(requiredEMACrosses) + " - Momentum perdu";
@@ -1087,7 +1089,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.4", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.5", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
