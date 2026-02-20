@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.60"
-#property description "SwiftReaper PRO v4.6 - Le Faucheur Ultime"
-#property description "Option A Puriste: Sorties Signal-Based Only"
-#property description "SL 3x ATR filet de sécurité - Anti-cycling + Startup fix"
+#property version   "4.70"
+#property description "SwiftReaper PRO v4.7 - Le Faucheur Ultime"
+#property description "Sorties H1-based: fini le bruit M5"
+#property description "Exit = H1 reversal + RANGE + DI cross + RSI extreme + Engulfing massif"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -161,6 +161,10 @@ double g_entryPrice = 0;
 datetime g_entryTime = 0;
 bool g_breakevenApplied = false;
 
+// DI à l'entrée (pour détecter un VRAI croisement, pas un état existant)
+double g_entryDIPlus = 0;
+double g_entryDIMinus = 0;
+
 // Nom objets graphiques
 string g_panelName = "SwiftReaperPRO";
 
@@ -238,7 +242,7 @@ int OnInit()
             " | SL: ", (UseStopLoss ? DoubleToString(StopLossATRMultiplier, 1) + "x ATR" : "Désactivé"));
    }
    
-   Print("✅ SwiftReaper PRO v4.6 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper PRO v4.7 initialisé sur ", g_displayName);
    if(HighConfidenceOnly)
       Print("⭐ MODE: HIGH CONFIDENCE ONLY (full margin)");
    Print("📍 Mode: ", EnableAutoTrading ? "AUTO-TRADING" : "Notifications uniquement");
@@ -302,6 +306,8 @@ void OnTick()
       g_breakevenApplied = false;
       g_entryPrice = 0;
       g_entryTime = 0;
+      g_entryDIPlus = 0;
+      g_entryDIMinus = 0;
       SaveState();
    }
    
@@ -341,10 +347,10 @@ void CheckNewCandles()
       TREND_TYPE previousTrend = g_currentTrend;
       DetectTrend();
       
-      // Si tendance H1 se RETOURNE complètement contre nous → SORTIE
-      // RANGE = ADX faiblit mais pas retournement → trailing/EMA gèrent
+      // Si tendance H1 se RETOURNE ou MEURT → SORTIE
       if(g_inPosition)
       {
+         // 1. Retournement complet (prix passe de l'autre côté de EMA50) → sortie immédiate
          if(g_positionType == SIGNAL_BUY && g_currentTrend == TREND_BEARISH)
          {
             SendExitSignal("⚠️ TENDANCE H1 RETOURNÉE BAISSIÈRE - SORS!");
@@ -352,6 +358,16 @@ void CheckNewCandles()
          else if(g_positionType == SIGNAL_SELL && g_currentTrend == TREND_BULLISH)
          {
             SendExitSignal("⚠️ TENDANCE H1 RETOURNÉE HAUSSIÈRE - SORS!");
+         }
+         // 2. v4.7: Tendance morte (ADX < seuil = RANGE) → sortie après minHold
+         //    La prémisse du trade (tendance forte) n'existe plus
+         else if(g_currentTrend == TREND_RANGE)
+         {
+            int holdMin = (g_entryTime > 0) ? (int)(TimeCurrent() - g_entryTime) / 60 : 999;
+            if(holdMin >= MinHoldMinutes)
+            {
+               SendExitSignal("📉 H1 passée en RANGE (ADX < " + DoubleToString(ADX_Threshold, 0) + ") - Tendance morte");
+            }
          }
       }
    }
@@ -611,26 +627,27 @@ void CheckEntrySignal()
 
 //+------------------------------------------------------------------+
 //| Vérification signal de SORTIE (M5 bougie FERMÉE)                 |
-//| Protection tendance forte H1 + temps minimum + seuils ATR        |
+//| v4.7: Sorties basées sur H1, plus de bruit M5                   |
+//| Philosophie: on entre sur H1+M5, on sort sur H1+extrêmes M5     |
+//| SUPPRIMÉ: EMA21 M5, engulfing normal M5, RSI Secure M5          |
+//| GARDÉ: RSI extrême M5, Engulfing MASSIF M5 (>50% ATR)           |
+//| AJOUTÉ: DI Cross H1 (vendeurs/acheteurs prennent le contrôle)   |
 //+------------------------------------------------------------------+
 void CheckExitSignal()
 {
    double rsiValues[];
-   double emaExitValues[];
    double closePrice[];
    double openPrice[];
    double highPrice[];
    double lowPrice[];
    
    ArraySetAsSeries(rsiValues, true);
-   ArraySetAsSeries(emaExitValues, true);
    ArraySetAsSeries(closePrice, true);
    ArraySetAsSeries(openPrice, true);
    ArraySetAsSeries(highPrice, true);
    ArraySetAsSeries(lowPrice, true);
    
    if(CopyBuffer(g_rsiM5Handle, 0, 0, 3, rsiValues) < 3) return;
-   if(CopyBuffer(g_emaExitM5Handle, 0, 0, 3, emaExitValues) < 3) return;
    if(CopyClose(g_symbol, TF_Entry, 0, 3, closePrice) < 3) return;
    if(CopyOpen(g_symbol, TF_Entry, 0, 3, openPrice) < 3) return;
    if(CopyHigh(g_symbol, TF_Entry, 0, 3, highPrice) < 3) return;
@@ -643,35 +660,13 @@ void CheckExitSignal()
    
    double bodySize1 = MathAbs(closePrice[1] - openPrice[1]);
    double bodySize2 = MathAbs(closePrice[2] - openPrice[2]);
-   
-   // Protection anti-doji : si bougie précédente a un corps minuscule, pas d'engulfing valide
    double pointSize = SymbolInfoDouble(g_symbol, SYMBOL_POINT);
-   double minBodyForEngulfing = pointSize * 5; // minimum 5 points de corps
    
    // === TEMPS MINIMUM EN POSITION ===
-   // Un trade trend-following a besoin de temps pour se développer
    int holdMinutes = (g_entryTime > 0) ? (int)(TimeCurrent() - g_entryTime) / 60 : 999;
    bool minHoldReached = (holdMinutes >= MinHoldMinutes);
    
-   // === PROTECTION TENDANCE FORTE H1 ===
-   // Principe fondamental: si H1 est en tendance FORTE (ADX >= 30) dans NOTRE direction,
-   // les signaux M5 contraires sont du BRUIT DE MARCHÉ, pas des raisons de sortir.
-   // Un engulfing M5 dans une tendance H1 forte = simple pullback, pas un retournement.
-   bool strongTrendProtection = false;
-   if(g_currentADX >= ADX_Strong)
-   {
-      if(g_positionType == SIGNAL_BUY && g_currentTrend == TREND_BULLISH)
-         strongTrendProtection = true;
-      if(g_positionType == SIGNAL_SELL && g_currentTrend == TREND_BEARISH)
-         strongTrendProtection = true;
-   }
-   
-   // Nombre de clôtures EMA requis (plus de patience en tendance forte)
-   int requiredEMACrosses = strongTrendProtection ? 8 : 5;  // 40 min vs 25 min
-   
-   // === PROTECTION BREAKEVEN (notification UNIQUEMENT en mode manuel) ===
-   // FIX v4.6: En auto-trading sans BE, cette notification est mensongère
-   // On ne la montre que quand le trader gère ses positions manuellement
+   // === NOTIFICATION BREAKEVEN (mode manuel uniquement) ===
    if(!EnableAutoTrading && !g_breakevenNotified && !g_breakevenApplied)
    {
       bool breakEvenZone = false;
@@ -696,124 +691,86 @@ void CheckExitSignal()
    // === SORTIE POSITION BUY ===
    if(g_positionType == SIGNAL_BUY)
    {
-      // 1. ENGULFING baissier - IGNORÉ si tendance H1 forte (c'est un pullback!)
-      //    Le corps doit être significatif: > 20% ATR H1, pas une micro-bougie
+      // 1. ENGULFING MASSIF M5 (corps > 50% ATR H1)
+      //    Un engulfing normal M5 = bruit de pullback en tendance H1, on l'IGNORE
+      //    Seul un engulfing MASSIF (crash violent) justifie une sortie depuis M5
       bool bearishEngulfing = (closePrice[1] < openPrice[1]) &&
                                (openPrice[1] >= closePrice[2]) &&
                                (closePrice[1] <= openPrice[2]) &&
                                (bodySize1 > bodySize2 * 1.2) &&
-                               (bodySize2 > minBodyForEngulfing) &&
-                               (bodySize1 > g_currentATR * 0.2);
-      
-      // FIX v4.6: Engulfing MASSIF (corps > 50% ATR) = sortie même en tendance forte
-      // Un tel engulfing n'est plus du bruit, c'est un vrai retournement/crash
-      bool massiveEngulfing = bearishEngulfing && (bodySize1 > g_currentATR * 0.5);
-      
-      if(bearishEngulfing && minHoldReached && (!strongTrendProtection || massiveEngulfing))
+                               (bodySize2 > pointSize * 5) &&
+                               (bodySize1 > g_currentATR * 0.5);  // >50% ATR = MASSIF uniquement
+      if(bearishEngulfing && minHoldReached)
       {
          shouldExit = true;
-         if(massiveEngulfing && strongTrendProtection)
-            exitReason = "⚠️ ENGULFING MASSIF baissier (>50% ATR) - Override tendance forte!";
-         else
-            exitReason = "Engulfing baissier + tendance H1 faiblit - SORS!";
+         exitReason = "⚠️ ENGULFING MASSIF baissier (>50% ATR) - Retournement violent!";
       }
       
-      // 2. EMA 21 cassée vers le bas - clôtures selon force tendance
-      // Compteur tourne dès le début, mais ne déclenche qu'après minHold
-      // Désactivé quand trailing actif (le trailing gère la sortie)
-      bool belowEMA = (closePrice[1] < emaExitValues[1]);
-      bool trailingGereSortie = (EnableTrailingStop && g_breakevenApplied);
-      if(belowEMA && !shouldExit && !trailingGereSortie)
-      {
-         g_emaCrossCount++;
-         if(g_emaCrossCount >= requiredEMACrosses && minHoldReached)
-         {
-            shouldExit = true;
-            exitReason = "EMA21 cassée x" + IntegerToString(requiredEMACrosses) + " - Momentum perdu";
-         }
-      }
-      else if(!belowEMA)
-      {
-         g_emaCrossCount = 0; // Reset si le prix revient au-dessus
-      }
-      
-      // 3. RSI surachat EXTRÊME (take profit) - toujours actif même en tendance forte
+      // 2. RSI EXTRÊME - take profit (le marché a donné tout ce qu'il avait)
       if(rsi >= RSI_Exit_TakeProfit && !shouldExit && minHoldReached)
       {
          shouldExit = true;
-         exitReason = "RSI " + IntegerToString(RSI_Exit_TakeProfit) + "+ Take profit!";
+         exitReason = "🎯 RSI " + IntegerToString(RSI_Exit_TakeProfit) + "+ Take profit!";
       }
       
-      // 4. RSI sécurisation + bougie rouge VRAIMENT FORTE (> 20% ATR H1)
-      // IGNORÉ si tendance H1 forte (RSI peut rester élevé longtemps en tendance)
-      bool strongBearishCandle = (closePrice[1] < openPrice[1]) && (bodySize1 > g_currentATR * 0.2);
-      if(rsi >= RSI_Exit_Secure && strongBearishCandle && !shouldExit && !strongTrendProtection && minHoldReached)
+      // 3. DI CROSS H1 - les vendeurs prennent le contrôle de la tendance
+      //    Condition: DI était en notre faveur à l'entrée ET s'est retourné
+      //    Seulement si ADX < 30 (en tendance super forte, le DI cross est temporaire)
+      //    Écart minimum de 5 points pour filtrer les croisements rasants
+      if(!shouldExit && minHoldReached && g_currentADX < ADX_Strong)
       {
-         shouldExit = true;
-         exitReason = "RSI " + IntegerToString(RSI_Exit_Secure) + " + forte bougie rouge - Sécurise";
+         bool diWasInFavor = (g_entryDIPlus > g_entryDIMinus);
+         bool diNowAgainst = (g_currentDIMinus > g_currentDIPlus);
+         double diGap = g_currentDIMinus - g_currentDIPlus;
+         
+         if(diWasInFavor && diNowAgainst && diGap >= 5.0)
+         {
+            shouldExit = true;
+            exitReason = "📊 DI- > DI+ de " + DoubleToString(diGap, 1) + " (H1) - Vendeurs prennent le contrôle";
+         }
       }
    }
    
    // === SORTIE POSITION SELL ===
    if(g_positionType == SIGNAL_SELL)
    {
-      // 1. ENGULFING haussier - IGNORÉ si tendance H1 forte (c'est un pullback!)
+      // 1. ENGULFING MASSIF M5 (corps > 50% ATR H1)
       bool bullishEngulfing = (closePrice[1] > openPrice[1]) &&
                                (openPrice[1] <= closePrice[2]) &&
                                (closePrice[1] >= openPrice[2]) &&
                                (bodySize1 > bodySize2 * 1.2) &&
-                               (bodySize2 > minBodyForEngulfing) &&
-                               (bodySize1 > g_currentATR * 0.2);
-      
-      // FIX v4.6: Engulfing MASSIF (corps > 50% ATR) = sortie même en tendance forte
-      bool massiveEngulfing = bullishEngulfing && (bodySize1 > g_currentATR * 0.5);
-      
-      if(bullishEngulfing && minHoldReached && (!strongTrendProtection || massiveEngulfing))
+                               (bodySize2 > pointSize * 5) &&
+                               (bodySize1 > g_currentATR * 0.5);
+      if(bullishEngulfing && minHoldReached)
       {
          shouldExit = true;
-         if(massiveEngulfing && strongTrendProtection)
-            exitReason = "⚠️ ENGULFING MASSIF haussier (>50% ATR) - Override tendance forte!";
-         else
-            exitReason = "Engulfing haussier + tendance H1 faiblit - SORS!";
+         exitReason = "⚠️ ENGULFING MASSIF haussier (>50% ATR) - Retournement violent!";
       }
       
-      // 2. EMA 21 cassée vers le haut - clôtures selon force tendance
-      // Compteur tourne dès le début, mais ne déclenche qu'après minHold
-      // Désactivé quand trailing actif (le trailing gère la sortie)
-      bool aboveEMA = (closePrice[1] > emaExitValues[1]);
-      if(aboveEMA && !shouldExit && !(EnableTrailingStop && g_breakevenApplied))
-      {
-         g_emaCrossCount++;
-         if(g_emaCrossCount >= requiredEMACrosses && minHoldReached)
-         {
-            shouldExit = true;
-            exitReason = "EMA21 cassée x" + IntegerToString(requiredEMACrosses) + " - Momentum perdu";
-         }
-      }
-      else if(!aboveEMA)
-      {
-         g_emaCrossCount = 0;
-      }
-      
-      // 3. RSI survente EXTRÊME (take profit)
+      // 2. RSI EXTRÊME - take profit
       if(rsi <= (100 - RSI_Exit_TakeProfit) && !shouldExit && minHoldReached)
       {
          shouldExit = true;
-         exitReason = "RSI " + IntegerToString(100 - RSI_Exit_TakeProfit) + "- Take profit!";
+         exitReason = "🎯 RSI " + IntegerToString(100 - RSI_Exit_TakeProfit) + "- Take profit!";
       }
       
-      // 4. RSI sécurisation + bougie verte VRAIMENT FORTE - IGNORÉ en tendance H1 forte
-      bool strongBullishCandle = (closePrice[1] > openPrice[1]) && (bodySize1 > g_currentATR * 0.2);
-      if(rsi <= (100 - RSI_Exit_Secure) && strongBullishCandle && !shouldExit && !strongTrendProtection && minHoldReached)
+      // 3. DI CROSS H1 - les acheteurs prennent le contrôle
+      if(!shouldExit && minHoldReached && g_currentADX < ADX_Strong)
       {
-         shouldExit = true;
-         exitReason = "RSI " + IntegerToString(100 - RSI_Exit_Secure) + " + forte bougie verte - Sécurise";
+         bool diWasInFavor = (g_entryDIMinus > g_entryDIPlus);
+         bool diNowAgainst = (g_currentDIPlus > g_currentDIMinus);
+         double diGap = g_currentDIPlus - g_currentDIMinus;
+         
+         if(diWasInFavor && diNowAgainst && diGap >= 5.0)
+         {
+            shouldExit = true;
+            exitReason = "📊 DI+ > DI- de " + DoubleToString(diGap, 1) + " (H1) - Acheteurs prennent le contrôle";
+         }
       }
    }
    
    if(shouldExit)
    {
-      g_emaCrossCount = 0;
       g_breakevenNotified = false;
       SendExitSignal(exitReason);
    }
@@ -887,6 +844,10 @@ void SendEntrySignal(SIGNAL_TYPE signal, SIGNAL_CONFIDENCE confidence)
    g_lastSignalTime = TimeCurrent();
    g_entryTime = TimeCurrent();
    g_breakevenApplied = false;
+   
+   // Stocker DI à l'entrée (pour détecter un VRAI croisement plus tard)
+   g_entryDIPlus = g_currentDIPlus;
+   g_entryDIMinus = g_currentDIMinus;
    
    // Stocker prix d'entrée
    if(signal == SIGNAL_BUY)
@@ -966,13 +927,12 @@ void SendExitSignal(string reason)
    g_entryPrice = 0;
    g_entryTime = 0;
    
-   // FIX v4.6: Reset compteur EMA (sinon un count=4 du trade précédent
-   // cause une sortie immédiate au prochain trade sur la 1ère bougie sous EMA21)
    g_emaCrossCount = 0;
    g_breakevenNotified = false;
+   g_entryDIPlus = 0;
+   g_entryDIMinus = 0;
    
-   // FIX v4.6: Cooldown après EXIT aussi (anti-cycling)
-   // Sans ça: entrée 10:00 → sortie 10:35 → cooldown = 35min > 30 → re-entrée immédiate
+   // Cooldown après EXIT aussi (anti-cycling)
    g_lastSignalTime = TimeCurrent();
    
    // Sauvegarder immédiatement
@@ -1119,7 +1079,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.6", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.7", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
