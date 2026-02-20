@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.70"
-#property description "SwiftReaper PRO v4.7 - Le Faucheur Ultime"
-#property description "Sorties H1-based: fini le bruit M5"
-#property description "Exit = H1 reversal + RANGE + DI cross + RSI extreme + Engulfing massif"
+#property version   "4.80"
+#property description "SwiftReaper PRO v4.8 - Le Faucheur Ultime"
+#property description "Entrées RSI ajustées pour tendance (Constance Brown)"
+#property description "RSI 40/60 en tendance + filtre distance EMA + nettoyage code mort"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -65,11 +65,9 @@ input double   ADX_Strong = 30.0;                // ADX fort (signal confiance H
 // Indicateurs Entrée (M5)
 input group "=== ENTRÉE M5 ==="
 input int      RSI_Period = 14;                  // Période RSI (entrée M5)
-input int      RSI_Oversold = 30;                // RSI survente (BUY zone)
-input int      RSI_Overbought = 70;              // RSI surachat (SELL zone)
-input int      EMA_Exit_Period = 21;             // EMA sortie M5 (21 = laisse respirer les trades)
+input int      RSI_Oversold = 40;                // RSI pullback BUY (40 = adapté tendance, Constance Brown)
+input int      RSI_Overbought = 60;              // RSI pullback SELL (60 = adapté tendance, Constance Brown)
 input int      RSI_Exit_TakeProfit = 80;         // RSI take profit (extrême - laisser courir en tendance)
-input int      RSI_Exit_Secure = 75;             // RSI sécurisation (+ bougie opposée FORTE ATR)
 
 // Filtres Avancés
 input group "=== FILTRES AVANCÉS ==="
@@ -78,6 +76,7 @@ input double   ATR_Min_Multiplier = 0.3;         // ATR min vs moyenne (0.3 = 30
 input int      MaxSpreadPoints = 30;             // Spread max autorisé (en points)
 input int      SignalCooldownMinutes = 30;        // Cooldown entre signaux (minutes)
 input int      MinHoldMinutes = 30;              // Temps minimum en position (minutes, anti-scalping)
+input double   MaxEMADistance_ATR = 2.5;         // Distance max prix-EMA50 en ATR (anti-chasing)
 
 // Filtres horaires (Heure du Bénin GMT+1)
 input group "=== FILTRES HORAIRES (Bénin GMT+1) ==="
@@ -141,7 +140,6 @@ int g_emaH1Handle;        // EMA 50 H1 (tendance)
 int g_adxH1Handle;        // ADX H1 (force tendance + DI)
 int g_atrH1Handle;        // ATR H1 (volatilité)
 int g_rsiM5Handle;        // RSI 14 M5 (entrée)
-int g_emaExitM5Handle;    // EMA 21 M5 (sortie)
 
 // Tracking bougies
 datetime g_lastH1Candle = 0;
@@ -150,8 +148,8 @@ datetime g_lastM5Candle = 0;
 // Cooldown
 datetime g_lastSignalTime = 0;
 
-// Compteur de clôtures sous/dessus EMA exit (exige 5-8 selon force tendance)
-int g_emaCrossCount = 0;
+// EMA50 H1 (pour filtre distance dans entrée)
+double g_currentEMA50 = 0;
 
 // Protection breakeven
 bool g_breakevenNotified = false;
@@ -200,14 +198,12 @@ int OnInit()
    g_adxH1Handle = iADX(g_symbol, TF_Trend, ADX_Period);
    g_atrH1Handle = iATR(g_symbol, TF_Trend, ATR_Period);
    
-   // M5 - Entrée/Sortie
+   // M5 - Entrée
    g_rsiM5Handle = iRSI(g_symbol, TF_Entry, RSI_Period, PRICE_CLOSE);
-   g_emaExitM5Handle = iMA(g_symbol, TF_Entry, EMA_Exit_Period, 0, MODE_EMA, PRICE_CLOSE);
    
    // Vérification handles
    if(g_emaH1Handle == INVALID_HANDLE || g_adxH1Handle == INVALID_HANDLE || 
-      g_atrH1Handle == INVALID_HANDLE || g_rsiM5Handle == INVALID_HANDLE || 
-      g_emaExitM5Handle == INVALID_HANDLE)
+      g_atrH1Handle == INVALID_HANDLE || g_rsiM5Handle == INVALID_HANDLE)
    {
       Print("❌ Erreur création indicateurs");
       return INIT_FAILED;
@@ -242,7 +238,7 @@ int OnInit()
             " | SL: ", (UseStopLoss ? DoubleToString(StopLossATRMultiplier, 1) + "x ATR" : "Désactivé"));
    }
    
-   Print("✅ SwiftReaper PRO v4.7 initialisé sur ", g_displayName);
+   Print("✅ SwiftReaper PRO v4.8 initialisé sur ", g_displayName);
    if(HighConfidenceOnly)
       Print("⭐ MODE: HIGH CONFIDENCE ONLY (full margin)");
    Print("📍 Mode: ", EnableAutoTrading ? "AUTO-TRADING" : "Notifications uniquement");
@@ -268,7 +264,6 @@ void OnDeinit(const int reason)
    if(g_adxH1Handle != INVALID_HANDLE) IndicatorRelease(g_adxH1Handle);
    if(g_atrH1Handle != INVALID_HANDLE) IndicatorRelease(g_atrH1Handle);
    if(g_rsiM5Handle != INVALID_HANDLE) IndicatorRelease(g_rsiM5Handle);
-   if(g_emaExitM5Handle != INVALID_HANDLE) IndicatorRelease(g_emaExitM5Handle);
    
    // Suppression objets graphiques
    ObjectsDeleteAll(0, g_panelName);
@@ -301,7 +296,6 @@ void OnTick()
       g_positionType = SIGNAL_NONE;
       g_lastSignal = SIGNAL_NONE;
       g_lastConfidence = CONFIDENCE_NONE;
-      g_emaCrossCount = 0;
       g_breakevenNotified = false;
       g_breakevenApplied = false;
       g_entryPrice = 0;
@@ -426,11 +420,12 @@ void DetectTrend()
    ArraySetAsSeries(atrLong, true);
    if(CopyBuffer(g_atrH1Handle, 0, 0, 51, atrLong) < 51) return;
    
-   // Stocker valeurs actuelles pour panneau
+   // Stocker valeurs actuelles pour panneau et filtres
    g_currentADX = adxValues[1];
    g_currentDIPlus = diPlusValues[1];
    g_currentDIMinus = diMinusValues[1];
    g_currentATR = atrLong[1];
+   g_currentEMA50 = emaValues[1];  // v4.8: stocké pour filtre distance dans CheckEntrySignal
    
    // Calcul ATR moyen (50 dernières bougies fermées)
    double atrSum = 0;
@@ -503,7 +498,10 @@ void DetectTrend()
 
 //+------------------------------------------------------------------+
 //| Vérification signal d'ENTRÉE (M5 bougie FERMÉE)                  |
-//| SwiftReaper RSI pullback + filtres PRO                           |
+//| v4.8: RSI ajusté pour tendance (Constance Brown / Fidelity)      |
+//| En uptrend: RSI range 40-90, support à 40-50 (pas 30!)           |
+//| En downtrend: RSI range 10-60, résistance à 50-60 (pas 70!)     |
+//| + Filtre distance EMA50 (anti-chasing)                           |
 //+------------------------------------------------------------------+
 void CheckEntrySignal()
 {
@@ -552,6 +550,19 @@ void CheckEntrySignal()
    double rsiPrev = rsiValues[2];
    g_currentRSI = rsi;
    
+   // === FILTRE 5 (v4.8): Distance EMA50 - anti-chasing ===
+   // Si prix trop loin de EMA50, on chasse un mouvement étendu = risqué
+   if(g_currentEMA50 > 0 && g_currentATR > 0)
+   {
+      double emaDistance = MathAbs(closePrice[1] - g_currentEMA50);
+      if(emaDistance > g_currentATR * MaxEMADistance_ATR)
+      {
+         Print("⏭️ Prix trop loin de EMA50 (", DoubleToString(emaDistance / g_currentATR, 1), 
+               "x ATR > ", DoubleToString(MaxEMADistance_ATR, 1), "x) - anti-chasing");
+         return;
+      }
+   }
+   
    // Bougie de confirmation
    bool bullishCandle = closePrice[1] > openPrice[1];
    bool bearishCandle = closePrice[1] < openPrice[1];
@@ -567,7 +578,9 @@ void CheckEntrySignal()
    // === SIGNAL BUY ===
    if(g_currentTrend == TREND_BULLISH)
    {
-      // RSI sort de survente + bougie haussiere de confirmation
+      // v4.8: RSI sort de zone pullback (40 par défaut, pas 30)
+      // En uptrend, le RSI reste dans 40-90 (Constance Brown / Fidelity)
+      // RSI < 40 = pullback → RSI repasse au-dessus = momentum reprend
       // OU RSI bas avec mèche forte de rejet (pin bar)
       bool rsiExitOversold = (rsiPrev <= RSI_Oversold && rsi > RSI_Oversold);
       bool rsiWithStrongRejection = (rsi < (RSI_Oversold + 5) && bullishRejection && lowerWick > bodySize * 2.0);
@@ -589,7 +602,6 @@ void CheckEntrySignal()
             return;
          }
          SendEntrySignal(SIGNAL_BUY, confidence);
-         g_emaCrossCount = 0;
          g_breakevenNotified = false;
          return;
       }
@@ -598,6 +610,9 @@ void CheckEntrySignal()
    // === SIGNAL SELL ===
    if(g_currentTrend == TREND_BEARISH)
    {
+      // v4.8: RSI sort de zone pullback (60 par défaut, pas 70)
+      // En downtrend, le RSI reste dans 10-60 (Constance Brown / Fidelity)
+      // RSI > 60 = pullback → RSI repasse en-dessous = momentum reprend
       bool rsiExitOverbought = (rsiPrev >= RSI_Overbought && rsi < RSI_Overbought);
       bool rsiWithStrongRejection = (rsi > (RSI_Overbought - 5) && bearishRejection && upperWick > bodySize * 2.0);
       
@@ -618,7 +633,6 @@ void CheckEntrySignal()
             return;
          }
          SendEntrySignal(SIGNAL_SELL, confidence);
-         g_emaCrossCount = 0;
          g_breakevenNotified = false;
          return;
       }
@@ -789,15 +803,17 @@ SIGNAL_CONFIDENCE CalculateConfidence(SIGNAL_TYPE signal, double rsi, double rsi
    else
       score += 1;
    
-   // 2. RSI était vraiment en zone extrême = +2
-   if(signal == SIGNAL_BUY && rsiPrev < 25)
-      score += 2;
-   else if(signal == SIGNAL_SELL && rsiPrev > 75)
-      score += 2;
+   // 2. v4.8: Profondeur du pullback RSI (ajusté pour tendance)
+   //    Pullback profond (RSI < 30 BUY ou > 70 SELL) = très rare en tendance = signal fort
+   //    Pullback standard (RSI dans la zone d'entrée) = signal normal
+   if(signal == SIGNAL_BUY && rsiPrev < 30)
+      score += 2;  // Pullback profond rare en uptrend = conviction forte
+   else if(signal == SIGNAL_SELL && rsiPrev > 70)
+      score += 2;  // Pullback profond rare en downtrend = conviction forte
    else if(signal == SIGNAL_BUY && rsiPrev <= RSI_Oversold)
-      score += 1;
+      score += 1;  // Pullback standard (zone d'entrée)
    else if(signal == SIGNAL_SELL && rsiPrev >= RSI_Overbought)
-      score += 1;
+      score += 1;  // Pullback standard (zone d'entrée)
    
    // 3. Mèche de rejet forte (pin bar) = +2
    if(wickSize > bodySize * 2.5)
@@ -927,7 +943,6 @@ void SendExitSignal(string reason)
    g_entryPrice = 0;
    g_entryTime = 0;
    
-   g_emaCrossCount = 0;
    g_breakevenNotified = false;
    g_entryDIPlus = 0;
    g_entryDIMinus = 0;
@@ -1079,7 +1094,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.7", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.8", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
@@ -1228,20 +1243,20 @@ void UpdatePanel()
    color rsiColor = PanelColor;
    if(g_currentRSI <= RSI_Oversold)
    {
-      rsiText += " (SURVENTE 🔥)";
+      rsiText += " (PULLBACK ZONE 🔥)";
       rsiColor = clrGreen;
    }
    else if(g_currentRSI >= RSI_Overbought)
    {
-      rsiText += " (SURACHAT 🔥)";
+      rsiText += " (PULLBACK ZONE 🔥)";
       rsiColor = clrRed;
    }
-   else if(g_currentRSI < 40)
+   else if(g_currentRSI < 50)
    {
       rsiText += " (zone basse)";
       rsiColor = clrDarkOrange;
    }
-   else if(g_currentRSI > 60)
+   else if(g_currentRSI > 50)
    {
       rsiText += " (zone haute)";
       rsiColor = clrDarkOrange;
@@ -1389,7 +1404,7 @@ void SaveState()
                          IntegerToString((int)g_currentTrend) + "|" +
                          IntegerToString((int)g_lastConfidence) + "|" +
                          IntegerToString((long)g_lastSignalTime) + "|" +
-                         IntegerToString(g_emaCrossCount) + "|" +
+                         IntegerToString(0) + "|" +  // placeholder pour compat ancien format
                          DoubleToString(g_entryPrice, 8) + "|" +
                          IntegerToString(g_breakevenApplied ? 1 : 0) + "|" +
                          IntegerToString((long)g_entryTime);
@@ -1432,8 +1447,7 @@ void LoadState()
             g_lastConfidence = (SIGNAL_CONFIDENCE)StringToInteger(parts[3]);
          if(count >= 5)
             g_lastSignalTime = (datetime)StringToInteger(parts[4]);
-         if(count >= 6)
-            g_emaCrossCount = (int)StringToInteger(parts[5]);
+         // position 5 = placeholder (ancien emaCrossCount, supprimé v4.8)
          if(count >= 7)
             g_entryPrice = StringToDouble(parts[6]);
          if(count >= 8)
@@ -1465,7 +1479,6 @@ void ResetState()
    g_entryPrice = 0;
    g_entryTime = 0;
    g_breakevenApplied = false;
-   g_emaCrossCount = 0;
    
    if(FileIsExist(g_stateFileName))
       FileDelete(g_stateFileName);
