@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.80"
-#property description "SwiftReaper PRO v4.8 - Le Faucheur Ultime"
-#property description "Entrées RSI ajustées pour tendance (Constance Brown)"
-#property description "RSI 40/60 en tendance + filtre distance EMA + nettoyage code mort"
+#property version   "4.90"
+#property description "SwiftReaper PRO v4.9 - Le Faucheur Ultime"
+#property description "v4.9: Fermeture auto avant news + cooldown news réduit"
+#property description "RSI 40/60 en tendance + filtre distance EMA + protection news"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -91,6 +91,7 @@ input group "=== FILTRE NEWS ==="
 input bool     FilterHighImpactNews = true;      // Filtrer les news HIGH IMPACT
 input int      NewsMinutesBefore = 30;           // Minutes avant news (pas de signal)
 input int      NewsMinutesAfter = 30;            // Minutes après news (pas de signal)
+input int      NewsCooldownMinutes = 5;          // Cooldown réduit après sortie news (5 min au lieu de 30)
 
 // Identification
 input group "=== IDENTIFICATION ==="
@@ -99,7 +100,7 @@ input string   PairName = "";                    // Nom personnalisé (vide = au
 // Auto-Trading (optionnel)
 input group "=== AUTO-TRADING (optionnel) ==="
 input bool     EnableAutoTrading = false;        // Activer le trading automatique
-input double   LotSize = 0.01;                   // Taille du lot
+input double   LotSize = 0.05;                   // Taille du lot
 input bool     UseStopLoss = true;               // Utiliser un Stop Loss (basé ATR)
 input double   StopLossATRMultiplier = 3.0;      // Stop Loss = X fois ATR H1 (filet de sécurité large)
 input int      MagicNumber = 202602;             // Numéro magique (identifie nos ordres)
@@ -162,6 +163,9 @@ bool g_breakevenApplied = false;
 // DI à l'entrée (pour détecter un VRAI croisement, pas un état existant)
 double g_entryDIPlus = 0;
 double g_entryDIMinus = 0;
+
+// v4.9: Sortie news = cooldown réduit
+bool g_lastExitWasNews = false;
 
 // Nom objets graphiques
 string g_panelName = "SwiftReaperPRO";
@@ -278,7 +282,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    // Mise à jour spread en temps réel
-   g_currentSpread = SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
+   g_currentSpread = (double)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
    
    // FIX v4.6: Si tendance encore inconnue (données pas chargées au démarrage), réessayer
    // Sans ça, le panneau reste "NEUTRE" jusqu'à 59 min et aucun signal ne peut partir
@@ -303,6 +307,13 @@ void OnTick()
       g_entryDIPlus = 0;
       g_entryDIMinus = 0;
       SaveState();
+   }
+   
+   // v4.9: PROTECTION NEWS - Fermer position si news HIGH IMPACT dans < 30 min
+   if(g_inPosition && FilterHighImpactNews && IsHighImpactNewsNear())
+   {
+      SendExitSignal("📰 NEWS HIGH IMPACT imminente - Protection capital!");
+      g_lastExitWasNews = true;  // Cooldown réduit après sortie news
    }
    
    // TRAILING STOP + BREAKEVEN (chaque tick, pas chaque bougie)
@@ -1000,10 +1011,17 @@ bool IsCooldownRespected()
    datetime currentTime = TimeCurrent();
    int elapsedMinutes = (int)(currentTime - g_lastSignalTime) / 60;
    
-   if(elapsedMinutes < SignalCooldownMinutes)
+   // v4.9: Cooldown réduit après sortie news (5 min au lieu de 30)
+   int cooldownToUse = g_lastExitWasNews ? NewsCooldownMinutes : SignalCooldownMinutes;
+   
+   if(elapsedMinutes < cooldownToUse)
    {
       return false;
    }
+   
+   // Reset flag news une fois cooldown passé
+   if(g_lastExitWasNews)
+      g_lastExitWasNews = false;
    
    return true;
 }
@@ -1094,7 +1112,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.8", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.9", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
