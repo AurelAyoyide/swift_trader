@@ -5,10 +5,10 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, SwiftReaper Development"
 #property link      "https://www.swiftreaper.com"
-#property version   "4.90"
-#property description "SwiftReaper PRO v4.9 - Le Faucheur Ultime"
-#property description "v4.9: Fermeture auto avant news + cooldown news réduit"
-#property description "RSI 40/60 en tendance + filtre distance EMA + protection news"
+#property version   "5.00"
+#property description "SwiftReaper PRO v5.0 - Le Faucheur Ultime"
+#property description "v5.0: Chandelier Step Trailing (3 phases ATR)"
+#property description "Breakeven 1x ATR → Trail 1.5x ATR → Trail serré 1x ATR"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -106,12 +106,17 @@ input double   StopLossATRMultiplier = 3.0;      // Stop Loss = X fois ATR H1 (f
 input int      MagicNumber = 202602;             // Numéro magique (identifie nos ordres)
 input int      MaxSlippage = 10;                 // Slippage max (points)
 
-// Gestion du Trade (maximiser les gains)
-input group "=== GESTION DU TRADE ==="
-input bool     EnableTrailingStop = false;       // Trailing Stop (désactivé: les signaux gèrent les sorties)
-input double   TrailingATRMultiplier = 2.0;      // Distance trailing = X fois ATR (si activé)
-input bool     EnableAutoBreakeven = false;      // Breakeven auto (désactivé: pas de BE prématuré)
-input double   BreakevenATRMultiplier = 1.5;     // Breakeven quand profit = X fois ATR (1.5 = laisse respirer)
+// Gestion du Trade - Chandelier Step Trailing (maximiser les gains)
+// Inspiré du Chandelier Exit (Chuck LeBeau / Investopedia)
+// 3 phases: Breakeven → Trail normal → Trail serré
+// ATR-based = s'adapte automatiquement à chaque paire/volatilité
+input group "=== GESTION DU TRADE (Chandelier Step) ==="
+input bool     EnableTrailingStop = true;        // Trailing Stop activé (Chandelier Step ATR)
+input bool     EnableAutoBreakeven = true;       // Phase 1: Breakeven auto quand profit = 1x ATR
+input double   BreakevenATRMultiplier = 1.0;     // Phase 1: Breakeven à 1x ATR de profit (protège capital)
+input double   TrailingATRMultiplier = 1.5;      // Phase 2: Trail à 1.5x ATR (à partir de 1.5x ATR profit)
+input double   TightTrailATRMultiplier = 1.0;    // Phase 3: Trail serré 1x ATR (à partir de 3x ATR profit)
+input double   TightTrailTrigger = 3.0;         // Phase 3 s'active à Xx ATR de profit (capturer les gros moves)
 
 //+------------------------------------------------------------------+
 //| VARIABLES GLOBALES                                               |
@@ -1112,7 +1117,7 @@ void CreatePanel()
    int y = 30;
    
    // Titre
-   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v4.9", x, y, PanelColor, 12);
+   CreateLabel(g_panelName + "_title", "☠️ SWIFT REAPER PRO v5.0", x, y, PanelColor, 12);
    y += 22;
    
    // Symbole
@@ -1516,8 +1521,12 @@ void UpdateRSI()
 }
 
 //+------------------------------------------------------------------+
-//| TRAILING STOP + AUTO BREAKEVEN                                   |
-//| Suit le prix pour maximiser les gains                            |
+//| CHANDELIER STEP TRAILING STOP + AUTO BREAKEVEN                   |
+//| Inspiré du Chandelier Exit (Chuck LeBeau) - ATR-based            |
+//| Phase 1: Breakeven à 1x ATR (protéger le capital)                |
+//| Phase 2: Trail à 1.5x ATR (laisser courir)                      |
+//| Phase 3: Trail serré 1x ATR quand profit > 3x ATR (capturer)    |
+//| Source: Investopedia trailing stops + Chandelier Exit strategy    |
 //+------------------------------------------------------------------+
 void ManageTrailingStop()
 {
@@ -1547,20 +1556,25 @@ void ManageTrailingStop()
       if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
       {
          double profit = bid - g_entryPrice;
+         double profitATR = (g_currentATR > 0) ? profit / g_currentATR : 0;
          
-         // 1. AUTO BREAKEVEN : quand profit >= BreakevenATR → SL = entry + 1 point
+         // PHASE 1: BREAKEVEN - quand profit >= 1x ATR → SL = entry + spread
+         // Objectif: éliminer le risque de perte dès que possible (crucial petit capital)
          if(EnableAutoBreakeven && !g_breakevenApplied)
          {
             double beDistance = g_currentATR * BreakevenATRMultiplier;
             if(profit >= beDistance)
             {
-               double newSL = NormalizeDouble(g_entryPrice + point, digits);
+               // SL à entry + spread (couvrir les frais)
+               double spreadCost = g_currentSpread * point;
+               double newSL = NormalizeDouble(g_entryPrice + spreadCost + point, digits);
                if(currentSL < newSL || currentSL == 0)
                {
                   if(g_trade.PositionModify(ticket, newSL, 0))
                   {
                      g_breakevenApplied = true;
-                     Print("🛡️ BREAKEVEN APPLIQUÉ! SL déplacé à ", DoubleToString(newSL, digits));
+                     Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
+                           " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
                      if(EnableNotifications)
                         SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
                      SaveState();
@@ -1569,20 +1583,41 @@ void ManageTrailingStop()
             }
          }
          
-         // 2. TRAILING STOP : suit le prix à distance TrailingATR
-         if(EnableTrailingStop && g_breakevenApplied)
+         // PHASE 2: TRAILING NORMAL - trail à 1.5x ATR du prix
+         // S'active après breakeven, donne de la place au trade pour respirer
+         if(EnableTrailingStop && g_breakevenApplied && profitATR < TightTrailTrigger)
          {
             double trailDistance = g_currentATR * TrailingATRMultiplier;
             double newSL = NormalizeDouble(bid - trailDistance, digits);
             
-            // Minimum 1 pip de mouvement pour limiter les requêtes broker
             double minStep = point * 10;
             if(newSL > currentSL + minStep && newSL > g_entryPrice)
             {
                if(g_trade.PositionModify(ticket, newSL, 0))
                {
-                  Print("📈 TRAILING STOP BUY: SL → ", DoubleToString(newSL, digits),
-                        " | Profit protégé: ", DoubleToString((newSL - g_entryPrice) / point, 0), " pts");
+                  Print("📈 PHASE 2 TRAIL BUY: SL → ", DoubleToString(newSL, digits),
+                        " | Profit: ", DoubleToString(profitATR, 1), "x ATR",
+                        " | Protégé: ", DoubleToString((newSL - g_entryPrice) / point, 0), " pts");
+               }
+            }
+         }
+         
+         // PHASE 3: TRAILING SERRÉ - trail à 1x ATR (gros gain = protéger!)
+         // Quand on est à 3x ATR de profit, le mouvement est étendu
+         // On serre le trail pour capturer un max avant le retournement
+         if(EnableTrailingStop && g_breakevenApplied && profitATR >= TightTrailTrigger)
+         {
+            double tightDistance = g_currentATR * TightTrailATRMultiplier;
+            double newSL = NormalizeDouble(bid - tightDistance, digits);
+            
+            double minStep = point * 10;
+            if(newSL > currentSL + minStep && newSL > g_entryPrice)
+            {
+               if(g_trade.PositionModify(ticket, newSL, 0))
+               {
+                  Print("🔥 PHASE 3 TRAIL SERRÉ BUY: SL → ", DoubleToString(newSL, digits),
+                        " | Profit: ", DoubleToString(profitATR, 1), "x ATR",
+                        " | Protégé: ", DoubleToString((newSL - g_entryPrice) / point, 0), " pts");
                }
             }
          }
@@ -1592,20 +1627,23 @@ void ManageTrailingStop()
       else if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
       {
          double profit = g_entryPrice - ask;
+         double profitATR = (g_currentATR > 0) ? profit / g_currentATR : 0;
          
-         // 1. AUTO BREAKEVEN
+         // PHASE 1: BREAKEVEN
          if(EnableAutoBreakeven && !g_breakevenApplied)
          {
             double beDistance = g_currentATR * BreakevenATRMultiplier;
             if(profit >= beDistance)
             {
-               double newSL = NormalizeDouble(g_entryPrice - point, digits);
+               double spreadCost = g_currentSpread * point;
+               double newSL = NormalizeDouble(g_entryPrice - spreadCost - point, digits);
                if(currentSL > newSL || currentSL == 0)
                {
                   if(g_trade.PositionModify(ticket, newSL, 0))
                   {
                      g_breakevenApplied = true;
-                     Print("🛡️ BREAKEVEN APPLIQUÉ! SL déplacé à ", DoubleToString(newSL, digits));
+                     Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
+                           " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
                      if(EnableNotifications)
                         SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
                      SaveState();
@@ -1614,20 +1652,38 @@ void ManageTrailingStop()
             }
          }
          
-         // 2. TRAILING STOP
-         if(EnableTrailingStop && g_breakevenApplied)
+         // PHASE 2: TRAILING NORMAL
+         if(EnableTrailingStop && g_breakevenApplied && profitATR < TightTrailTrigger)
          {
             double trailDistance = g_currentATR * TrailingATRMultiplier;
             double newSL = NormalizeDouble(ask + trailDistance, digits);
             
-            // Minimum 1 pip de mouvement pour limiter les requêtes broker
             double minStep = point * 10;
             if((newSL < currentSL - minStep || currentSL == 0) && newSL < g_entryPrice)
             {
                if(g_trade.PositionModify(ticket, newSL, 0))
                {
-                  Print("📉 TRAILING STOP SELL: SL → ", DoubleToString(newSL, digits),
-                        " | Profit protégé: ", DoubleToString((g_entryPrice - newSL) / point, 0), " pts");
+                  Print("📈 PHASE 2 TRAIL SELL: SL → ", DoubleToString(newSL, digits),
+                        " | Profit: ", DoubleToString(profitATR, 1), "x ATR",
+                        " | Protégé: ", DoubleToString((g_entryPrice - newSL) / point, 0), " pts");
+               }
+            }
+         }
+         
+         // PHASE 3: TRAILING SERRÉ
+         if(EnableTrailingStop && g_breakevenApplied && profitATR >= TightTrailTrigger)
+         {
+            double tightDistance = g_currentATR * TightTrailATRMultiplier;
+            double newSL = NormalizeDouble(ask + tightDistance, digits);
+            
+            double minStep = point * 10;
+            if((newSL < currentSL - minStep || currentSL == 0) && newSL < g_entryPrice)
+            {
+               if(g_trade.PositionModify(ticket, newSL, 0))
+               {
+                  Print("🔥 PHASE 3 TRAIL SERRÉ SELL: SL → ", DoubleToString(newSL, digits),
+                        " | Profit: ", DoubleToString(profitATR, 1), "x ATR",
+                        " | Protégé: ", DoubleToString((g_entryPrice - newSL) / point, 0), " pts");
                }
             }
          }
