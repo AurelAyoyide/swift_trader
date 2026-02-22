@@ -1560,26 +1560,33 @@ void ManageTrailingStop()
          
          // PHASE 1: BREAKEVEN - quand profit >= 1x ATR → SL = entry + spread
          // Objectif: éliminer le risque de perte dès que possible (crucial petit capital)
-         if(EnableAutoBreakeven && !g_breakevenApplied)
+         if(!g_breakevenApplied)
          {
             double beDistance = g_currentATR * BreakevenATRMultiplier;
             if(profit >= beDistance)
             {
-               // SL à entry + spread (couvrir les frais)
-               double spreadCost = g_currentSpread * point;
-               double newSL = NormalizeDouble(g_entryPrice + spreadCost + point, digits);
-               if(currentSL < newSL || currentSL == 0)
+               if(EnableAutoBreakeven)
                {
-                  if(g_trade.PositionModify(ticket, newSL, 0))
+                  // SL à entry + spread (couvrir les frais)
+                  double spreadCost = g_currentSpread * point;
+                  double newSL = NormalizeDouble(g_entryPrice + spreadCost + point, digits);
+                  if(currentSL < newSL || currentSL == 0)
                   {
-                     g_breakevenApplied = true;
-                     Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
-                           " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
-                     if(EnableNotifications)
-                        SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
-                     SaveState();
+                     if(g_trade.PositionModify(ticket, newSL, 0))
+                     {
+                        Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
+                              " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
+                        if(EnableNotifications)
+                           SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
+                     }
+                     else
+                        Print("⚠️ Breakeven refusé par broker - trailing activé quand même");
                   }
                }
+               // Sécurité: on marque breakeven atteint même si le modify échoue
+               // pour que les phases 2/3 puissent s'activer
+               g_breakevenApplied = true;
+               SaveState();
             }
          }
          
@@ -1630,25 +1637,30 @@ void ManageTrailingStop()
          double profitATR = (g_currentATR > 0) ? profit / g_currentATR : 0;
          
          // PHASE 1: BREAKEVEN
-         if(EnableAutoBreakeven && !g_breakevenApplied)
+         if(!g_breakevenApplied)
          {
             double beDistance = g_currentATR * BreakevenATRMultiplier;
             if(profit >= beDistance)
             {
-               double spreadCost = g_currentSpread * point;
-               double newSL = NormalizeDouble(g_entryPrice - spreadCost - point, digits);
-               if(currentSL > newSL || currentSL == 0)
+               if(EnableAutoBreakeven)
                {
-                  if(g_trade.PositionModify(ticket, newSL, 0))
+                  double spreadCost = g_currentSpread * point;
+                  double newSL = NormalizeDouble(g_entryPrice - spreadCost - point, digits);
+                  if(currentSL > newSL || currentSL == 0)
                   {
-                     g_breakevenApplied = true;
-                     Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
-                           " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
-                     if(EnableNotifications)
-                        SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
-                     SaveState();
+                     if(g_trade.PositionModify(ticket, newSL, 0))
+                     {
+                        Print("🛡️ PHASE 1 BREAKEVEN! SL → ", DoubleToString(newSL, digits),
+                              " | Profit: ", DoubleToString(profitATR, 1), "x ATR");
+                        if(EnableNotifications)
+                           SendNotification("🛡️ BREAKEVEN: " + g_displayName + " | Perte impossible!");
+                     }
+                     else
+                        Print("⚠️ Breakeven refusé par broker - trailing activé quand même");
                   }
                }
+               g_breakevenApplied = true;
+               SaveState();
             }
          }
          
